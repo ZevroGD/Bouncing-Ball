@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Physics Box</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0f17; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #hud {
+    position: fixed; top: 12px; left: 14px; pointer-events: none;
+    font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; color: #94a3b8;
+    white-space: pre; text-shadow: 0 0 6px #000;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+
+<script>
+"use strict";
+
+/* ---------- Configuration ---------- */
+const CONFIG = {
+  boxMargin: 0.12,          // fraction of the viewport kept empty around the box
+  restitution: 1,           // 1 = perfectly elastic
+  gravity: { x: 0, y: 0 },  // px/s^2 (zero for now)
+  fixedStep: 1 / 240,       // physics step in seconds
+  maxFrameTime: 0.1,        // clamp huge frame gaps (e.g. tab was hidden)
+  ball: { radius: 16, speed: 420, angleDeg: 35 }
+};
+
+/* ---------- Physics ---------- */
+class Ball {
+  constructor(x, y, vx, vy, radius) {
+    this.x = x; this.y = y;
+    this.vx = vx; this.vy = vy;
+    this.radius = radius;
+    this.prevX = x; this.prevY = y;   // for render interpolation
+    this.dragging = false;            // true while the user holds it
+  }
+  get speed() { return Math.hypot(this.vx, this.vy); }
+}
+
+class Box {
+  constructor() { this.left = 0; this.top = 0; this.right = 0; this.bottom = 0; }
+  get width() { return this.right - this.left; }
+  get height() { return this.bottom - this.top; }
+  get cx() { return (this.left + this.right) / 2; }
+  get cy() { return (this.top + this.bottom) / 2; }
+}
+
+class World {
+  constructor(box) {
+    this.box = box;
+    this.bodies = [];
+    this.gravity = { ...CONFIG.gravity };
+    this.restitution = CONFIG.restitution;
+  }
+
+  add(body) { this.bodies.push(body); return body; }
+
+  // Advance the simulation by dt seconds.
+  step(dt) {
+    for (const b of this.bodies) {
+      b.prevX = b.x; b.prevY = b.y;
+      if (b.dragging) continue;   // the user controls this body
+      // Semi-implicit Euler: velocity first, then position.
+      b.vx += this.gravity.x * dt;
+      b.vy += this.gravity.y * dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      this.collideWalls(b);
+      // Future hooks: this.collideBodies(...), this.collideObstacles(...)
+    }
+  }
+
+  // Reflect the velocity component normal to each wall hit.
+  // Position is mirrored about the wall so no energy or distance is lost.
+  collideWalls(b) {
+    const { left, right, top, bottom } = this.box;
+    const e = this.restitution, r = b.radius;
+
+    const minX = left + r, maxX = right - r;
+    if (minX >= maxX) { b.x = this.box.cx; b.vx = 0; }   // box narrower than ball
+    else if (b.x < minX) { b.x = minX + (minX - b.x); b.vx = -b.vx * e; }
+    else if (b.x > maxX) { b.x = maxX - (b.x - maxX); b.vx = -b.vx * e; }
+
+    const minY = top + r, maxY = bottom - r;
+    if (minY >= maxY) { b.y = this.box.cy; b.vy = 0; }
+    else if (b.y < minY) { b.y = minY + (minY - b.y); b.vy = -b.vy * e; }
+    else if (b.y > maxY) { b.y = maxY - (b.y - maxY); b.vy = -b.vy * e; }
+
+    // Safety net: never leave the box, even after extreme steps or resizes.
+    b.x = Math.min(Math.max(b.x, minX), maxX);
+    b.y = Math.min(Math.max(b.y, minY), maxY);
+  }
+
+  // Hard-clamp a body inside the box (no bounce). Used while dragging.
+  clampInside(b) {
+    const { left, right, top, bottom } = this.box, r = b.radius;
+    b.x = Math.min(Math.max(b.x, left + r), Math.max(left + r, right - r));
+    b.y = Math.min(Math.max(b.y, top + r), Math.max(top + r, bottom - r));
+  }
+
+  // Keep every body inside after the box changes size.
+  clampAll() {
+    for (const b of this.bodies) {
+      this.collideWalls(b);
+      b.prevX = b.x; b.prevY = b.y;
+    }
+  }
+}
+
+/* ---------- Rendering ---------- */
+class Renderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.w = 0; this.h = 0;
+  }
+
+  resize() {
+    const dpr = window.devicePixelRatio || 1;
+    this.w = window.innerWidth; this.h = window.innerHeight;
+    this.canvas.width = Math.round(this.w * dpr);
+    this.canvas.height = Math.round(this.h * dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  draw(world, alpha) {
+    const { ctx, w, h } = this;
+    const box = world.box;
+    ctx.clearRect(0, 0, w, h);
+
+    // Box
+    ctx.save();
+    ctx.shadowColor = "rgba(34, 211, 238, 0.35)";
+    ctx.shadowBlur = 18;
+    ctx.strokeStyle = "#22d3ee";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(box.left, box.top, box.width, box.height);
+    ctx.restore();
+    ctx.fillStyle = "rgba(255,255,255,0.02)";
+    ctx.fillRect(box.left, box.top, box.width, box.height);
+
+    // Bodies (interpolated between the last two physics states)
+    for (const b of world.bodies) {
+      const x = b.prevX + (b.x - b.prevX) * alpha;
+      const y = b.prevY + (b.y - b.prevY) * alpha;
+      const g = ctx.createRadialGradient(x - b.radius * 0.35, y - b.radius * 0.35,
+                                         b.radius * 0.1, x, y, b.radius);
+      g.addColorStop(0, "#f8fafc");
+      g.addColorStop(1, "#f59e0b");
+      ctx.beginPath();
+      ctx.arc(x, y, b.radius, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+  }
+}
+
+/* ---------- Setup ---------- */
+const canvas = document.getElementById("c");
+const hud = document.getElementById("hud");
+const renderer = new Renderer(canvas);
+const box = new Box();
+const world = new World(box);
+
+function layoutBox() {
+  const mx = renderer.w * CONFIG.boxMargin, my = renderer.h * CONFIG.boxMargin;
+  box.left = mx; box.top = my;
+  box.right = renderer.w - mx; box.bottom = renderer.h - my;
+}
+
+renderer.resize();
+layoutBox();
+
+{
+  const a = CONFIG.ball.angleDeg * Math.PI / 180;
+  world.add(new Ball(
+    box.cx, box.cy,
+    Math.cos(a) * CONFIG.ball.speed,
+    Math.sin(a) * CONFIG.ball.speed,
+    CONFIG.ball.radius
+  ));
+}
+const ball = world.bodies[0];
+
+window.addEventListener("resize", () => {
+  renderer.resize();
+  layoutBox();
+  world.clampAll();
+});
+
+/* ---------- Dragging ---------- */
+const DRAG = {
+  grabSlack: 14,         // extra px around the ball that still counts as a grab (finger friendly)
+  velocityWindow: 100,   // ms of pointer history used to compute the throw velocity
+  maxThrowSpeed: 2500    // px/s cap so a flick can't launch the ball absurdly fast
+};
+const drag = { body: null, pointerId: null, offX: 0, offY: 0, samples: [] };
+
+function pointerPos(e) { return { x: e.clientX, y: e.clientY }; }
+
+function bodyAt(p) {
+  // Topmost (last added) body under the pointer.
+  for (let i = world.bodies.length - 1; i >= 0; i--) {
+    const b = world.bodies[i];
+    if (Math.hypot(p.x - b.x, p.y - b.y) <= b.radius + DRAG.grabSlack) return b;
+  }
+  return null;
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (drag.body) return;                      // ignore extra fingers
+  const p = pointerPos(e), b = bodyAt(p);
+  if (!b) return;
+  drag.body = b; drag.pointerId = e.pointerId;
+  drag.offX = b.x - p.x; drag.offY = b.y - p.y;   // keep the grab point, no jump
+  drag.samples = [{ x: p.x, y: p.y, t: performance.now() }];
+  b.dragging = true; b.vx = 0; b.vy = 0;
+  canvas.setPointerCapture(e.pointerId);
+  canvas.style.cursor = "grabbing";
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  const p = pointerPos(e);
+  if (!drag.body) {
+    canvas.style.cursor = bodyAt(p) ? "grab" : "default";
+    return;
+  }
+  if (e.pointerId !== drag.pointerId) return;
+  const b = drag.body;
+  b.x = p.x + drag.offX; b.y = p.y + drag.offY;
+  world.clampInside(b);
+  b.prevX = b.x; b.prevY = b.y;
+  const t = performance.now();
+  drag.samples.push({ x: b.x, y: b.y, t });
+  while (drag.samples.length > 2 && t - drag.samples[0].t > DRAG.velocityWindow) drag.samples.shift();
+});
+
+function endDrag(e) {
+  if (!drag.body || e.pointerId !== drag.pointerId) return;
+  const b = drag.body, now = performance.now(), s = drag.samples;
+  // Throw velocity = displacement over the recent pointer history.
+  // If the pointer has been still for a moment, the ball is simply released at rest.
+  const first = s[0], last = s[s.length - 1];
+  const span = (last.t - first.t) / 1000;
+  if (span > 0.005 && now - last.t < 80) {
+    b.vx = (last.x - first.x) / span;
+    b.vy = (last.y - first.y) / span;
+    const sp = b.speed;
+    if (sp > DRAG.maxThrowSpeed) { b.vx *= DRAG.maxThrowSpeed / sp; b.vy *= DRAG.maxThrowSpeed / sp; }
+  } else {
+    b.vx = 0; b.vy = 0;
+  }
+  b.dragging = false;
+  drag.body = null; drag.pointerId = null; drag.samples = [];
+  canvas.style.cursor = "default";
+}
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+/* ---------- Main loop ---------- */
+let last = performance.now();
+let accumulator = 0;
+let frames = 0, fpsTimer = 0, fps = 0;
+
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, CONFIG.maxFrameTime);
+  last = now;
+
+  // Fixed-step physics driven by real elapsed time: results do not depend on frame rate.
+  accumulator += dt;
+  while (accumulator >= CONFIG.fixedStep) {
+    world.step(CONFIG.fixedStep);
+    accumulator -= CONFIG.fixedStep;
+  }
+  renderer.draw(world, accumulator / CONFIG.fixedStep);
+
+  // FPS (averaged over 0.5 s)
+  frames++; fpsTimer += dt;
+  if (fpsTimer >= 0.5) {
+    fps = frames / fpsTimer; frames = 0; fpsTimer = 0;
+    hud.textContent =
+      `FPS    ${fps.toFixed(0)}\n` +
+      `vx     ${ball.vx.toFixed(1)} px/s\n` +
+      `vy     ${ball.vy.toFixed(1)} px/s\n` +
+      `speed  ${ball.speed.toFixed(1)} px/s`;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
